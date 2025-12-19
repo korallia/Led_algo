@@ -1,0 +1,140 @@
+#include <Adafruit_NeoPixel.h>
+#include <math.h>
+
+#define LED_PIN 6
+#define NUM_LEDS 16
+#define FLAME_LEDS 16
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// -------------------------
+// Paramètres thermiques
+// -------------------------
+const float T_ENV      = 300.0;
+const float T_HOT      = 15000000000000000000000000.0;
+const float RATIO_BASE = 0.7;
+const float K_SHAPE    = 2.0;
+
+// Index des colonnes
+const uint8_t cosIndices[]  = {1,2,3};
+const uint8_t bellIndices[] = {4,5,6};
+
+// -------------------------
+// Paramètres lumière
+// -------------------------
+const float minBrightness = 0.2f;
+
+// Prototypes
+void computeFlameTemperatures(float temps[], int n);
+void kelvinToRGB(float kelvin, uint8_t &R, uint8_t &G, uint8_t &B);
+void applyCosineModel(const float temps[]);
+void applySaturation(uint8_t &r, uint8_t &g, uint8_t &b, float saturation);
+
+void setup() {
+  strip.begin();
+  strip.clear();
+  Serial.begin(9600);
+  strip.setBrightness(60);
+
+  float temps[FLAME_LEDS];
+  computeFlameTemperatures(temps, FLAME_LEDS);
+
+  applyCosineModel(temps);  // colonne cos
+  strip.show();
+}
+
+void loop() {
+  // rien pour l’instant
+}
+
+void computeFlameTemperatures(float temps[], int n) {
+  if (n <= 0) return;
+  float deltaT = T_HOT - T_ENV;
+  float denom  = 1.0 - exp(-K_SHAPE);
+
+  for (int i = 0; i < n; i++) {
+    float z = (n == 1) ? 1.0 : (float)i / (float)(n - 1);
+    float E = (denom != 0.0) ? (1.0 - exp(-K_SHAPE * z)) / denom : z;
+    float thermalFactor = RATIO_BASE + (1.0 - RATIO_BASE) * E;
+    temps[i] = T_ENV + deltaT * thermalFactor;
+  }
+}
+
+void kelvinToRGB(float kelvin, uint8_t &R, uint8_t &G, uint8_t &B) {
+  float temp = kelvin / 100.0f;
+  float red, green, blue;
+
+  if (temp <= 66.0f) red = 255.0f;
+  else {
+    red = 329.698727446f * pow(temp - 60.0f, -0.1332047592f);
+    red = constrain(red, 0.0f, 255.0f);
+  }
+
+  if (temp <= 66.0f)
+    green = 99.4708025861f * log(temp) - 161.1195681661f;
+  else
+    green = 288.1221695283f * pow(temp - 60.0f, -0.0755148492f);
+  green = constrain(green, 0.0f, 255.0f);
+
+  if (temp >= 66.0f) blue = 255.0f;
+  else if (temp <= 19.0f) blue = 0.0f;
+  else blue = 138.5177312231f * log(temp - 10.0f) - 305.0447927307f;
+  blue = constrain(blue, 0.0f, 255.0f);
+
+  red *= 0.7f;
+  green *= 1.2f;
+  green = (green > 255.0f) ? 255.0f : green;
+
+  R = (uint8_t)round(red);
+  G = (uint8_t)round(green);
+  B = (uint8_t)round(blue);
+}
+
+void applyCosineModel(const float temps[]) {
+  int n = sizeof(cosIndices) / sizeof(cosIndices[0]);
+  for (int i = 0; i < n; i++) {
+    uint8_t r, g, b;
+    kelvinToRGB(temps[i], r, g, b);
+
+    float z = (float)i / (float)(n - 1);
+    float raw = 0.5f * (1.0f + cos(M_PI * (1.0f - z)));
+    float brightness = minBrightness + (1.0f - minBrightness) * raw;
+
+    r *= brightness;
+    g *= brightness;
+    b *= brightness;
+
+    // 🌈 Variation de saturation simulée ici (entre 0.5 et 1.0)
+    float saturation = 0.5f + 0.5f * z;
+    applySaturation(r, g, b, saturation);
+
+    Serial.print("LED Cos ");
+    Serial.print(cosIndices[i]);
+    Serial.print(" -> Bright: ");
+    Serial.print(brightness, 2);
+    Serial.print(" | Sat: ");
+    Serial.print(saturation, 2);
+    Serial.print(" | RGB: (");
+    Serial.print((int)r);
+    Serial.print(", ");
+    Serial.print((int)g);
+    Serial.print(", ");
+    Serial.print((int)b);
+    Serial.println(")");
+
+    strip.setPixelColor(cosIndices[i], strip.Color(r, g, b));
+  }
+}
+
+void applySaturation(uint8_t &r, uint8_t &g, uint8_t &b, float saturation) {
+  float rf = r, gf = g, bf = b;
+  float gray = 0.299f * rf + 0.587f * gf + 0.114f * bf;
+
+  rf = gray + (rf - gray) * saturation;
+  gf = gray + (gf - gray) * saturation;
+  bf = gray + (bf - gray) * saturation;
+
+  r = (uint8_t)constrain(round(rf), 0, 255);
+  g = (uint8_t)constrain(round(gf), 0, 255);
+  b = (uint8_t)constrain(round(bf), 0, 255);
+}
