@@ -1,0 +1,86 @@
+#include <Adafruit_NeoPixel.h>
+#include <math.h>
+
+#define LED_PIN 6
+#define NUM_LEDS 16
+#define FRAME_MS 16  // ~60 fps
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Indices des 3 LEDs (ajuste si besoin)
+const uint8_t px1 = 3; // LED 1
+const uint8_t px2 = 2; // LED 2
+const uint8_t px3 = 1; // LED 3 (fixe)
+
+// Tes 3 couleurs calculées
+struct C { uint8_t r,g,b; };
+const C col1 = { 29,  23, 12};
+const C col2 = { 99,  73, 19};
+const C col3 = {179, 128,  0};
+
+// Période moyenne + variation douce (ms)
+#define BASE_PERIOD_MS (700.0f / 6.0f)
+#define PERIOD_JITTER  (260.0f / 6.0f)
+
+static inline float clampf(float x, float lo, float hi){ return x<lo?lo:(x>hi?hi:x); }
+static inline float lerpf(float a, float b, float t){ return a + (b-a)*t; }
+static inline uint8_t lerp8(uint8_t a, uint8_t b, float t){
+  int v = (int)lroundf(lerpf((float)a, (float)b, t));
+  if (v < 0) v = 0; if (v > 255) v = 255;
+  return (uint8_t)v;
+}
+
+// pulse doux 0..1 (cosine): 0->1->0 sans cassure
+static inline float pulse01(float phase01){
+  return 0.5f - 0.5f * cosf(phase01 * 2.0f * (float)M_PI);
+}
+
+float phaseAcc1 = 0.0f;
+float phaseAcc2 = 0.0f;
+
+float smoothPeriodMs(float t, float offset){
+  float period = BASE_PERIOD_MS
+               + PERIOD_JITTER * (0.65f * sinf(t * 0.70f + offset)
+                                + 0.35f * sinf(t * 0.33f + offset * 1.6f));
+  // bornes originales / 6
+  return clampf(period, 380.0f / 6.0f, 1400.0f / 6.0f);
+}
+
+void setup() {
+  strip.begin();
+  strip.clear();
+  strip.setBrightness(255);
+  strip.show();
+}
+
+void loop() {
+  float t = millis() * 0.001f;
+
+  // LED1: col1 <-> col2
+  float p1 = smoothPeriodMs(t, 1.3f);
+  phaseAcc1 += (float)FRAME_MS / p1;
+  if (phaseAcc1 >= 1.0f) phaseAcc1 -= 1.0f;
+  float mix1 = pulse01(phaseAcc1);
+
+  uint8_t r1 = lerp8(col1.r, col2.r, mix1);
+  uint8_t g1 = lerp8(col1.g, col2.g, mix1);
+  uint8_t b1 = lerp8(col1.b, col2.b, mix1);
+  strip.setPixelColor(px1, strip.gamma32(strip.Color(r1, g1, b1)));
+
+  // LED2: col2 <-> col3
+  float p2 = smoothPeriodMs(t, 2.7f);
+  phaseAcc2 += (float)FRAME_MS / p2;
+  if (phaseAcc2 >= 1.0f) phaseAcc2 -= 1.0f;
+  float mix2 = pulse01(phaseAcc2);
+
+  uint8_t r2 = lerp8(col2.r, col3.r, mix2);
+  uint8_t g2 = lerp8(col2.g, col3.g, mix2);
+  uint8_t b2 = lerp8(col2.b, col3.b, mix2);
+  strip.setPixelColor(px2, strip.gamma32(strip.Color(r2, g2, b2)));
+
+  // LED3: fixe sur col3
+  strip.setPixelColor(px3, strip.gamma32(strip.Color(col3.r, col3.g, col3.b)));
+
+  strip.show();
+  delay(FRAME_MS);
+}
