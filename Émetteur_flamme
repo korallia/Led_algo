@@ -1,0 +1,64 @@
+#include <esp_now.h>
+#include <WiFi.h>
+
+// --- CONFIGURATION ---
+uint8_t broadcastAddress[] = {0xB0, 0xCB, 0xD8, 0x8A, 0xF6, 0x80}; 
+#define BOOT_BUTTON_PIN 0 
+
+typedef struct __attribute__((packed)) {
+  uint32_t hotColor;
+  uint32_t envColor;
+  float kShape; 
+  float ratioBase;
+  // Nouvelles variables pour l'animation
+  float basePeriod; 
+  float jitter;
+  char name[16]; // Pour afficher le nom
+} FlameProfile;
+
+// --- TA BIBLIOTHÈQUE DE RECETTES MISE À JOUR ---
+FlameProfile profiles[] = {
+  // {Hot, Env, kShape, ratio, Period, Jitter, Name}
+  {0x1EFEB4, 0x002805, 1.2, 0.2, 115.0, 43.0, "Copper"},
+  {0xFF9619, 0x5A1400, 1.3, 0.25, 130.0, 50.0, "Amber"},
+  {0xFFFAF0, 0x0005FF, 2.2, 0.15, 80.0, 20.0, "Magnesium"},
+  {0x28FFE6, 0x000AB4, 1.8, 0.2, 100.0, 35.0, "Cyan"},
+  {0xC864FF, 0x28005A, 2.0, 0.15, 150.0, 60.0, "Potassium"}
+  
+};
+
+int numProfiles = 5;
+int currentIndex = 0;
+bool lastButtonState = HIGH;
+
+void sendProfile(FlameProfile p) {
+  esp_now_send(broadcastAddress, (uint8_t *) &p, sizeof(FlameProfile));
+  Serial.print(">>> INCANTATION : ");
+  Serial.println(p.name);
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) return;
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  sendProfile(profiles[currentIndex]);
+}
+
+void loop() {
+  bool currentButtonState = digitalRead(BOOT_BUTTON_PIN);
+  if (lastButtonState == HIGH && currentButtonState == LOW) {
+    delay(50); 
+    currentIndex = (currentIndex + 1) % numProfiles;
+    sendProfile(profiles[currentIndex]);
+    delay(250); 
+  }
+  lastButtonState = currentButtonState;
+}
