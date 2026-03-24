@@ -1,0 +1,155 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <Adafruit_NeoPixel.h>
+#include <math.h>
+
+// --- CONFIGURATION HARDWARE ---
+#define LED_PIN 27   
+#define NUM_LEDS 16
+#define FRAME_MS 16 
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// --- STRUCTURES (Doit être 100% identique à l'émetteur) ---
+typedef struct __attribute__((packed)) {
+  uint32_t hotColor;
+  uint32_t envColor;
+  float kShape; 
+  float ratioBase;
+  float basePeriod; 
+  float jitter;
+  char name[16];
+} FlameProfile;
+
+struct C { uint8_t r, g, b; };
+
+// --- VARIABLES GLOBALES ---
+// Profil par défaut (Copper) au cas où l'émetteur n'est pas là
+FlameProfile currentProfile = {0x1EFEB4, 0x002805, 1.2, 0.2, 115.0, 43.0, "Copper"}; 
+FlameProfile tempProfile; 
+volatile bool newDataReady = false;
+
+unsigned long lastUpdate = 0;
+const uint8_t px1 = 3; 
+const uint8_t px2 = 2; 
+const uint8_t px3 = 1; 
+
+float phaseAcc1 = 0.0f;
+float phaseAcc2 = 0.0f;
+
+// --- MOTEUR DE FLAMME ---
+C getFlameColor(FlameProfile p, float z) {
+  float denom = 1.0 - exp(-p.kShape);
+  float E = (denom != 0.0) ? (1.0 - exp(-p.kShape * z)) / denom : z;
+  float heat = p.ratioBase + (1.0 - p.ratioBase) * E;
+
+  float rh = (p.hotColor >> 16) & 0xFF;
+  float gh = (p.hotColor >> 8) & 0xFF;
+  float bh = p.hotColor & 0xFF;
+  float re = (p.envColor >> 16) & 0xFF;
+  float ge = (p.envColor >> 8) & 0xFF;
+  float be = p.envColor & 0xFF;
+
+  float r_f = re + (rh - re) * heat;
+  float g_f = ge + (gh - ge) * heat;
+  float b_f = be + (bh - be) * heat;
+
+  // Protections de teintes
+  if (be > 150 && rh > 200) {
+    float redThreshold = 0.5f; 
+    r_f = (heat < redThreshold) ? 0 : rh * ((heat - redThreshold) / (1.0f - redThreshold));
+    if (b_f > g_f) g_f = b_f * 1.05f;
+  }
+  if (gh > rh && g_f < b_f) g_f = b_f * 1.1f;
+
+  float lift = 1.0f + 0.2f * sin(M_PI * heat);
+  float masterDim = 0.5f; 
+  float shape = 0.4f + 0.6f * (0.5f * (1.0f + cos(M_PI * (1.0f - z))));
+
+  return {
+    (uint8_t)constrain(r_f * lift * masterDim * shape, 0, 255),
+    (uint8_t)constrain(g_f * lift * masterDim * shape, 0, 255),
+    (uint8_t)constrain(b_f * lift * masterDim * shape, 0, 255)
+  };
+}
+
+// --- UTILS ---
+static inline float lerpf(float a, float b, float t){ return a + (b-a)*t; }
+static inline uint8_t lerp8(uint8_t a, uint8_t b, float t){
+  return (uint8_t)constrain(lroundf(lerpf((float)a, (float)b, t)), 0, 255);
+}
+static inline float pulse01(float phase01){
+  return 0.5f - 0.5f * cosf(phase01 * 2.0f * (float)M_PI);
+}
+
+// Nouvelle version utilisant les variables du profil reçu
+float smoothPeriodMs(float t, float offset, float bP, float jitt) {
+  float period = bP + jitt * (0.65f * sinf(t * 0.70f + offset) + 0.35f * sinf(t * 0.33f + offset * 1.6f));
+  return (period < 40.0f) ? 40.0f : period; 
+}
+
+// --- CALLBACK RECEPTION ---
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingData, int len) {
+  if (len == sizeof(FlameProfile)) {
+    memcpy(&tempProfile, incomingData, sizeof(tempProfile));
+    newDataReady = true; 
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  strip.begin();
+  strip.clear();
+  strip.show();
+
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) return;
+  
+  esp_now_register_recv_cb(OnDataRecv);
+  Serial.println("Lanterne prete a recevoir des potions...");
+}
+
+void loop() {
+  // Synchronisation sécurisée des données radio
+  if (newDataReady) {
+    noInterrupts();
+    memcpy(&currentProfile, &tempProfile, sizeof(FlameProfile));
+    newDataReady = false;
+    interrupts();
+    Serial.print("Nouvelle mixture infusee : ");
+    Serial.println(currentProfile.name);
+  }
+
+  // Animation cadencée
+  if (millis() - lastUpdate >= FRAME_MS) {
+    lastUpdate = millis();
+    float t = millis() * 0.001f;
+    strip.clear(); 
+
+    C col1 = getFlameColor(currentProfile, 0.0f);
+    C col2 = getFlameColor(currentProfile, 0.5f);
+    C col3 = getFlameColor(currentProfile, 1.0f);
+
+    // Utilisation des périodes dynamiques de la mixture
+    float p1 = smoothPeriodMs(t, 1.3f, currentProfile.basePeriod, currentProfile.jitter);
+    phaseAcc1 += (float)FRAME_MS / p1;
+    if (phaseAcc1 >= 1.0f) phaseAcc1 -= 1.0f;
+    float mix1 = pulse01(phaseAcc1);
+    strip.setPixelColor(px1, strip.gamma32(strip.Color(lerp8(col1.r, col2.r, mix1), 
+                                                      lerp8(col1.g, col2.g, mix1), 
+                                                      lerp8(col1.b, col2.b, mix1))));
+
+    float p2 = smoothPeriodMs(t, 2.7f, currentProfile.basePeriod, currentProfile.jitter);
+    phaseAcc2 += (float)FRAME_MS / p2;
+    if (phaseAcc2 >= 1.0f) phaseAcc2 -= 1.0f;
+    float mix2 = pulse01(phaseAcc2);
+    strip.setPixelColor(px2, strip.gamma32(strip.Color(lerp8(col2.r, col3.r, mix2), 
+                                                      lerp8(col2.g, col3.g, mix2), 
+                                                      lerp8(col2.b, col3.b, mix2))));
+
+    strip.setPixelColor(px3, strip.gamma32(strip.Color(col3.r, col3.g, col3.b)));
+
+    strip.show();
+  }
+}
